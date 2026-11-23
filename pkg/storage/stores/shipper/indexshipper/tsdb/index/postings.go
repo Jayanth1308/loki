@@ -20,7 +20,6 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/bboreham/go-loser"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 )
@@ -518,67 +517,137 @@ func Merge(its ...Postings) Postings {
 	if len(its) == 1 {
 		return its[0]
 	}
-
-	p := newMergedPostings(its)
-	return p
+	return newMergedPostings(its)
 }
 
 type mergedPostings struct {
-	h   *loser.Tree[storage.SeriesRef, Postings]
+	// its are the inputs. its[0] has already been advanced to its first value.
+	its []Postings
+
+	// nodes is the loser tree, or nil until it is built. With n inputs,
+	// nodes[n+i] is the leaf for its[i], nodes[1:n] are the internal nodes,
+	// each holding the loser of the game played there, and nodes[0] holds the
+	// overall winner.
+	nodes []mergedPostingsNode
+
 	cur storage.SeriesRef
 	err error
-	// started is set by the first Next or Seek. newMergedPostings calls
-	// IsEmpty, which initializes the tree, so the first Next must return the
-	// tree's current winner instead of advancing past it.
-	started bool
+}
+
+type mergedPostingsNode struct {
+	// value is the current value of the leaf at index, or
+	// mergedPostingsMaxVal if that input is exhausted.
+	value storage.SeriesRef
+	index int
 }
 
 // mergedPostingsMaxVal must be higher than all real values used in the tree.
 // The tree's winner has this value once every input is exhausted.
 const mergedPostingsMaxVal = storage.SeriesRef(math.MaxUint64)
 
-func newMergedPostings(p []Postings) (m Postings) {
-	if len(p) == 0 {
-		return EmptyPostings()
-	}
-	lt := loser.New(p, mergedPostingsMaxVal)
-	// loser.New has called Next on every input, so any that failed up front
-	// have already reported their error.
-	for _, it := range p {
+func newMergedPostings(p []Postings) Postings {
+	for i, it := range p {
+		if it.Next() {
+			return &mergedPostings{its: p[i:]}
+		}
 		if err := it.Err(); err != nil {
 			return ErrPostings(err)
 		}
 	}
-	if lt.IsEmpty() {
-		return EmptyPostings()
+	return EmptyPostings()
+}
+
+// build advances every input to its first value at or above minVal, and
+// builds the tree from them. It reports whether the merge has a value.
+func (it *mergedPostings) build(minVal storage.SeriesRef) bool {
+	n := len(it.its)
+	nodes := make([]mergedPostingsNode, 2*n)
+	for i, p := range it.its {
+		ok := i == 0 || p.Next() // newMergedPostings has advanced its[0].
+		if ok && p.At() < minVal {
+			ok = p.Seek(minVal)
+		}
+		leaf := &nodes[n+i]
+		leaf.index = n + i
+		if ok {
+			leaf.value = p.At()
+		} else if err := p.Err(); err != nil {
+			it.err = err
+			return false
+		} else {
+			leaf.value = mergedPostingsMaxVal
+		}
 	}
-	return &mergedPostings{h: lt}
+
+	// Play every game from the leaves up, storing the winner of each game in
+	// its node. A node's children come after it, so they are done first.
+	for i := n - 1; i > 0; i-- {
+		if l, r := nodes[2*i], nodes[2*i+1]; l.value <= r.value {
+			nodes[i] = l
+		} else {
+			nodes[i] = r
+		}
+	}
+	nodes[0] = nodes[1]
+	// Now replace each winner with the loser of the same game, from the root
+	// down, so that each node's children still hold their winners.
+	for i := 1; i < n; i++ {
+		if l, r := nodes[2*i], nodes[2*i+1]; l.value <= r.value {
+			nodes[i] = r
+		} else {
+			nodes[i] = l
+		}
+	}
+	it.nodes = nodes
+
+	if nodes[0].value == mergedPostingsMaxVal {
+		return false
+	}
+	it.cur = nodes[0].value
+	return true
+}
+
+// replay records that the input at leaf index now has value v, and replays
+// the games on its path to the root.
+func (it *mergedPostings) replay(index int, v storage.SeriesRef) {
+	nodes := it.nodes
+	for i := index >> 1; i > 0; i >>= 1 {
+		if n := &nodes[i]; n.value < v {
+			// The input that lost here now wins, and the replayed input loses.
+			n.index, index = index, n.index
+			n.value, v = v, n.value
+		}
+	}
+	nodes[0] = mergedPostingsNode{value: v, index: index}
 }
 
 func (it *mergedPostings) Next() bool {
-	if it.err != nil || it.h.At() == mergedPostingsMaxVal {
+	if it.err != nil {
 		return false
 	}
-	if !it.started {
-		it.started = true
-		it.cur = it.h.At()
-		return true
+	if it.nodes == nil {
+		return it.build(0)
 	}
 	for {
-		w := it.h.Winner()
-		ok := w.Next()
-		if !ok && w.Err() != nil {
-			it.err = w.Err()
+		w := it.nodes[0]
+		if w.value == mergedPostingsMaxVal {
 			return false
 		}
-		it.h.Fix(!ok)
-		newItem := it.h.At()
-		if newItem == mergedPostingsMaxVal { // Optimisation - faster than it.h.IsEmpty()
+		p := it.its[w.index-len(it.its)]
+		v := mergedPostingsMaxVal
+		if p.Next() {
+			v = p.At()
+		} else if err := p.Err(); err != nil {
+			it.err = err
 			return false
 		}
-		// Remove duplicate entries.
-		if newItem != it.cur {
-			it.cur = newItem
+		it.replay(w.index, v)
+		// Skip values that more than one input has.
+		if v := it.nodes[0].value; v != it.cur {
+			if v == mergedPostingsMaxVal {
+				return false
+			}
+			it.cur = v
 			return true
 		}
 	}
@@ -588,20 +657,28 @@ func (it *mergedPostings) Seek(id storage.SeriesRef) bool {
 	if it.err != nil {
 		return false
 	}
-	it.started = true
-	for it.h.At() < id {
-		w := it.h.Winner()
-		ok := w.Seek(id)
-		if !ok && w.Err() != nil {
-			it.err = w.Err()
+	if it.nodes == nil {
+		return it.build(id)
+	}
+	for {
+		w := it.nodes[0]
+		if w.value >= id {
+			break
+		}
+		p := it.its[w.index-len(it.its)]
+		v := mergedPostingsMaxVal
+		if p.Seek(id) {
+			v = p.At()
+		} else if err := p.Err(); err != nil {
+			it.err = err
 			return false
 		}
-		it.h.Fix(!ok)
+		it.replay(w.index, v)
 	}
-	if it.h.At() == mergedPostingsMaxVal { // Optimisation - faster than it.h.IsEmpty()
+	if it.nodes[0].value == mergedPostingsMaxVal {
 		return false
 	}
-	it.cur = it.h.At()
+	it.cur = it.nodes[0].value
 	return true
 }
 

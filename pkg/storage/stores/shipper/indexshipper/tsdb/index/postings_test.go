@@ -1093,3 +1093,275 @@ func TestNewMergedPostingsNoInputs(t *testing.T) {
 		require.Equal(t, EmptyPostings(), p)
 	}
 }
+
+// countingPostings counts the calls to Next and Seek on the Postings it wraps.
+type countingPostings struct {
+	Postings
+	calls int
+}
+
+func (p *countingPostings) Next() bool {
+	p.calls++
+	return p.Postings.Next()
+}
+
+func (p *countingPostings) Seek(v storage.SeriesRef) bool {
+	p.calls++
+	return p.Postings.Seek(v)
+}
+
+func TestMergedPostingsIsLazy(t *testing.T) {
+	inputs := func() ([]*countingPostings, []Postings) {
+		counting := []*countingPostings{
+			{Postings: newListPostings()},
+			{Postings: newListPostings(1, 4)},
+			{Postings: newListPostings(2, 3)},
+			{Postings: newListPostings(3, 5)},
+		}
+		its := make([]Postings, len(counting))
+		for i, p := range counting {
+			its[i] = p
+		}
+		return counting, its
+	}
+
+	// Building the merge advances inputs only until one has a value.
+	counting, its := inputs()
+	p := Merge(its...)
+	require.NotEqual(t, EmptyPostings(), p)
+	require.Equal(t, []int{1, 1, 0, 0}, []int{counting[0].calls, counting[1].calls, counting[2].calls, counting[3].calls})
+
+	// The first Next advances the rest.
+	require.True(t, p.Next())
+	require.Equal(t, storage.SeriesRef(1), p.At())
+	require.Equal(t, []int{1, 1, 1, 1}, []int{counting[0].calls, counting[1].calls, counting[2].calls, counting[3].calls})
+	got, err := ExpandPostings(p)
+	require.NoError(t, err)
+	require.Equal(t, []storage.SeriesRef{2, 3, 4, 5}, got)
+}
+
+func TestMergedPostingsLaterInputFailsUpFront(t *testing.T) {
+	errFail := errors.New("fail")
+	inputs := func() []Postings {
+		return []Postings{
+			newListPostings(1, 2),
+			newListPostings(),
+			newFailingPostings(errFail),
+			newListPostings(3),
+		}
+	}
+
+	t.Run("Next", func(t *testing.T) {
+		p := Merge(inputs()...)
+		require.False(t, p.Next())
+		require.ErrorIs(t, p.Err(), errFail)
+		require.False(t, p.Next())
+		require.False(t, p.Seek(1))
+	})
+
+	t.Run("Seek", func(t *testing.T) {
+		p := Merge(inputs()...)
+		require.False(t, p.Seek(2))
+		require.ErrorIs(t, p.Err(), errFail)
+		require.False(t, p.Next())
+	})
+
+	t.Run("Intersect", func(t *testing.T) {
+		p := Intersect(newListPostings(1, 2, 3), Merge(inputs()...))
+		require.False(t, p.Next())
+		require.ErrorIs(t, p.Err(), errFail)
+	})
+}
+
+func TestMergedPostingsFirstSeek(t *testing.T) {
+	cases := []struct {
+		name string
+		in   [][]storage.SeriesRef
+		seek storage.SeriesRef
+		want []storage.SeriesRef
+	}{
+		{
+			name: "skips whole inputs",
+			in:   [][]storage.SeriesRef{{1, 2}, {3, 4}, {10, 12}, {5, 11}},
+			seek: 6,
+			want: []storage.SeriesRef{10, 11, 12},
+		},
+		{
+			name: "lands on a value",
+			in:   [][]storage.SeriesRef{{1, 7}, {3, 7, 8}},
+			seek: 7,
+			want: []storage.SeriesRef{7, 8},
+		},
+		{
+			name: "below every value",
+			in:   [][]storage.SeriesRef{{4, 6}, {5}},
+			seek: 2,
+			want: []storage.SeriesRef{4, 5, 6},
+		},
+		{
+			name: "past every value",
+			in:   [][]storage.SeriesRef{{1, 2}, {3}},
+			seek: 4,
+		},
+		{
+			name: "leading inputs exhausted",
+			in:   [][]storage.SeriesRef{{}, {}, {2, 3}, {1}},
+			seek: 2,
+			want: []storage.SeriesRef{2, 3},
+		},
+		{
+			name: "only the last input has values",
+			in:   [][]storage.SeriesRef{{}, {}, {}, {5, 6}},
+			seek: 6,
+			want: []storage.SeriesRef{6},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			its := make([]Postings, len(c.in))
+			for i, l := range c.in {
+				its[i] = newListPostings(l...)
+			}
+			p := Merge(its...)
+			var got []storage.SeriesRef
+			if p.Seek(c.seek) {
+				got = append(got, p.At())
+				for p.Next() {
+					got = append(got, p.At())
+				}
+			}
+			require.NoError(t, p.Err())
+			require.Equal(t, c.want, got)
+		})
+	}
+}
+
+// TestMergedPostingsRandom compares random sequences of Next and Seek on a
+// merge with the same sequences on a sorted, deduplicated list of its values.
+func TestMergedPostingsRandom(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	for n := 1; n <= 40; n++ {
+		for run := 0; run < 20; run++ {
+			lists := make([][]storage.SeriesRef, n)
+			seen := map[storage.SeriesRef]struct{}{}
+			for i := range lists {
+				// Some inputs are empty, and values often repeat across inputs.
+				size := r.Intn(9)
+				l := make([]storage.SeriesRef, 0, size)
+				for v := storage.SeriesRef(r.Intn(4)); len(l) < size; v += storage.SeriesRef(1 + r.Intn(6)) {
+					l = append(l, v)
+					seen[v] = struct{}{}
+				}
+				lists[i] = l
+			}
+			want := make([]storage.SeriesRef, 0, len(seen))
+			for v := range seen {
+				want = append(want, v)
+			}
+			sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+
+			its := make([]Postings, n)
+			for i, l := range lists {
+				its[i] = newListPostings(l...)
+			}
+			p := Merge(its...)
+			if len(want) == 0 {
+				if n > 1 { // Merge returns a single input as it is.
+					require.Equal(t, EmptyPostings(), p)
+				}
+				continue
+			}
+
+			// pos is the index in want of the merge's current value.
+			pos := -1
+			for step := 0; step < 30; step++ {
+				if r.Intn(2) == 0 {
+					ok := p.Next()
+					pos++
+					require.Equal(t, pos < len(want), ok, "n=%d run=%d step=%d: Next", n, run, step)
+					if !ok {
+						break
+					}
+				} else {
+					// Sometimes seek past the last value.
+					id := storage.SeriesRef(r.Intn(int(want[len(want)-1]) + 4))
+					ok := p.Seek(id)
+					// Seek never moves backwards.
+					next := sort.Search(len(want), func(i int) bool { return want[i] >= id })
+					pos = max(pos, next)
+					require.Equal(t, pos < len(want), ok, "n=%d run=%d step=%d: Seek(%d)", n, run, step, id)
+					if !ok {
+						break
+					}
+				}
+				require.Equal(t, want[pos], p.At(), "n=%d run=%d step=%d", n, run, step)
+			}
+			require.NoError(t, p.Err())
+		}
+	}
+}
+
+// BenchmarkMergedPostings measures building a merge of n postings lists and
+// then using it in a few ways, from not at all to reading every value.
+func BenchmarkMergedPostings(b *testing.B) {
+	const perInput = 64
+
+	for _, n := range []int{2, 16, 256, 2048} {
+		// Input i holds i, i+n, i+2n, ..., so the inputs interleave.
+		lists := make([][]byte, n)
+		for i := range lists {
+			buf := make([]byte, 0, 4*perInput)
+			for j := range perInput {
+				buf = binary.BigEndian.AppendUint32(buf, uint32(i+j*n))
+			}
+			lists[i] = buf
+		}
+		total := storage.SeriesRef(n * perInput)
+
+		modes := []struct {
+			name string
+			use  func(Postings) int
+		}{
+			// The merge is built but never read, like a merge inside an
+			// intersection that stops early.
+			{"build", func(Postings) int { return 0 }},
+			// The merge is read once.
+			{"next", func(p Postings) int {
+				if p.Next() {
+					return 1
+				}
+				return 0
+			}},
+			// The merge is first sought to a value half-way through.
+			{"seek", func(p Postings) int {
+				if p.Seek(total / 2) {
+					return 1
+				}
+				return 0
+			}},
+			// The merge is read to the end.
+			{"all", func(p Postings) int {
+				c := 0
+				for p.Next() {
+					c++
+				}
+				return c
+			}},
+		}
+
+		for _, mode := range modes {
+			b.Run(fmt.Sprintf("n=%d/%s", n, mode.name), func(b *testing.B) {
+				ps := make([]BigEndianPostings, n)
+				its := make([]Postings, n)
+				b.ReportAllocs()
+				for b.Loop() {
+					for i, l := range lists {
+						ps[i] = BigEndianPostings{list: l}
+						its[i] = &ps[i]
+					}
+					mode.use(Merge(its...))
+				}
+			})
+		}
+	}
+}
