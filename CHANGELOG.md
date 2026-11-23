@@ -1,5 +1,15 @@
 # Changelog
 
+## [3.7.11](https://github.com/grafana/loki/compare/v3.7.10...v3.7.11) (2026-11-23)
+
+
+### Bug Fixes
+
+* **pattern:** Drain aggregation Push buffer on Stop [release-3.7.x] ([#26674](https://github.com/grafana/loki/issues/26674)) ([3f0f973](https://github.com/grafana/loki/commit/3f0f973f2185acbf6320bbafd1f5e0a35fcfeed5))
+* **pattern:** Retry 429 and 5xx pushes and drop other client errors [release-3.7.x] ([#26670](https://github.com/grafana/loki/issues/26670)) ([e592f10](https://github.com/grafana/loki/commit/e592f10c5d739b22128212d3708b82fdf198fe5f))
+* **querier:** Reconnect query workers without backoff after a canceled query [release-3.7.x] ([#26667](https://github.com/grafana/loki/issues/26667)) ([dcc02cc](https://github.com/grafana/loki/commit/dcc02cc4cb985ad0b6dd966692689c84eecb414f))
+* **security/HIGH/:** Update module github.com/containerd/containerd/v2 to v2.2.10 [SECURITY] (release-3.7.x) ([#26620](https://github.com/grafana/loki/issues/26620)) ([bbe20a8](https://github.com/grafana/loki/commit/bbe20a849cfa134d3803fa497783f316e8c91007))
+
 ## [3.7.10](https://github.com/grafana/loki/compare/v3.7.9...v3.7.10) (2026-11-13)
 
 
