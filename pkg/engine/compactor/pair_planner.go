@@ -116,6 +116,11 @@ type pairPlanner struct {
 	// maxKeySize is the largest uncompressed input of one sort prefix in a
 	// merge. 0 disables the check.
 	maxKeySize uint64
+
+	// cache holds the stats reads of earlier scans. The planner reads the
+	// stats of every index run through it. Its reads are shared, so the
+	// planner must not modify them.
+	cache *logSectionsCache
 }
 
 // planWindow plans the jobs of one window of tenant. It skips every index
@@ -142,6 +147,7 @@ type pairPlanner struct {
 func (p *pairPlanner) planWindow(ctx context.Context, tenant string, window time.Time, leased leaseSnapshot, legacy legacyPolicy) (pairWindowPlan, error) {
 	entries, err := loadTenantIndexes(ctx, p.bucket, window, tenant)
 	if p.bucket.IsObjNotFoundErr(err) {
+		p.cache.dropUnlisted(window, nil)
 		return pairWindowPlan{}, nil
 	}
 	if err != nil {
@@ -149,6 +155,7 @@ func (p *pairPlanner) planWindow(ctx context.Context, tenant string, window time
 	}
 
 	indexRuns := groupIndexRuns(entries)
+	p.cache.dropUnlisted(window, indexRuns)
 	freeIndexRuns := slices.DeleteFunc(slices.Clone(indexRuns), func(indexRun indexRun) bool {
 		return slices.ContainsFunc(indexRun.paths(), leased.holdsIndex)
 	})
@@ -196,7 +203,7 @@ func (p *pairPlanner) readCandidates(ctx context.Context, logger log.Logger, ten
 			if err := groupCtx.Err(); err != nil {
 				return err
 			}
-			logSections, err := readLogSections(groupCtx, p.bucket, tenant, indexRun)
+			logSections, err := p.cache.read(groupCtx, p.bucket, window, indexRun)
 			switch {
 			case errors.Is(err, errCorruptIndex):
 				skipCorruptIndex(logger, p.metrics, tenant, window, indexRun.String(), phaseLabelPairMerge, err)
