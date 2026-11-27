@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.0.0-rc.5](https://github.com/grafana/loki/compare/v4.0.0-rc.4...v4.0.0-rc.5) (2026-11-27)
+
+
+### Bug Fixes
+
+* **mixin:** Add reason label to duplicate LokiCompactorHasNotSuccessfullyRunCompaction alerts [release-4.0.0] ([#26749](https://github.com/grafana/loki/issues/26749)) ([37f29fc](https://github.com/grafana/loki/commit/37f29fc37fc056bb5342d2969a3f21754ee363a4))
+* **pattern:** Drain aggregation Push buffer on Stop [release-4.0.0] ([#26673](https://github.com/grafana/loki/issues/26673)) ([30be792](https://github.com/grafana/loki/commit/30be792da07ce295d3ebd2152bca51a7c264a1de))
+* **pattern:** Fix inverted client check in the pattern tee fallback [release-4.0.0] ([#26750](https://github.com/grafana/loki/issues/26750)) ([f52f6df](https://github.com/grafana/loki/commit/f52f6dfe2e402855417f204709823e727ef888ca))
+* **pattern:** Retry 429 and 5xx pushes and drop other client errors [release-4.0.0] ([#26672](https://github.com/grafana/loki/issues/26672)) ([541f049](https://github.com/grafana/loki/commit/541f049f3e7356b978e7b1848ea1a981da9b5d7a))
+* **querier:** Reconnect query workers without backoff after a canceled query [release-4.0.0] ([#26666](https://github.com/grafana/loki/issues/26666)) ([b40d394](https://github.com/grafana/loki/commit/b40d3940ec92025f72b56cd210b2b64624b1ebb0))
+* **security:** Bump Go to 1.27.4 [release-4.0.0] ([#26739](https://github.com/grafana/loki/issues/26739)) ([c7643d5](https://github.com/grafana/loki/commit/c7643d5fd7af743e10bf17c38c6dff501445565f))
+* **storage:** Keep chunks whose last entry is at the query start [release-4.0.0] ([#26738](https://github.com/grafana/loki/issues/26738)) ([55c8363](https://github.com/grafana/loki/commit/55c836348421764473eeb6325dbfaab467be6e21))
+
 ## [4.0.0-rc.4](https://github.com/grafana/loki/compare/v4.0.0-rc.3...v4.0.0-rc.4) (2026-11-20)
 
 
